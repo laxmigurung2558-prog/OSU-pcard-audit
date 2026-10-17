@@ -121,6 +121,6 @@ async function askWithGemini(question){
 for(const sel of document.querySelectorAll('.year')){sel.innerHTML=YEARS.map(y=>`<option value="${y}" ${y===2014?'selected':''}>${y}</option>`).join('');}
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab').forEach(t=>{t.classList.toggle('active',t===b);t.setAttribute('aria-selected',String(t===b));});document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id===b.dataset.tab));});
 $('askForm').onsubmit=e=>{e.preventDefault();askWithGemini($('question').value);};
-document.querySelectorAll('[data-question]').forEach(b=>b.onclick=()=>{$('question').value=b.dataset.question;askWithGemini(b.dataset.question);});
+document.querySelectorAll('[data-question]').forEach(b=>b.onclick=()=>{$('question').value=b.dataset.question;askQuestion(b.dataset.question);});
 $('descForm').onsubmit=e=>{e.preventDefault();search('desc');};$('vendorForm').onsubmit=e=>{e.preventDefault();search('vendor');};
 getYear(2014).catch(e=>showError('askResult',e));
