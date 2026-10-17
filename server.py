@@ -44,34 +44,47 @@ def interpret():
     question = str(payload.get('question', '')).strip()
     if not question or len(question) > 1000:
         return jsonify(error='Enter a question of at most 1,000 characters.'), 400
-    # Deterministic handling for uncomplicated population-wide audit totals.
-    # This works even when Gemini is unavailable, with no model-generated SQL.
-    normalized = question.lower()
-    asks_transaction_count = bool(re.search(
-        r'\b(?:how many|number of|count|total number of)\b', normalized
-    )) and bool(re.search(r'\b(?:transactions?|p[ -]?card (?:purchases|charges))\b', normalized))
+    # Deterministic, read-only interpretation for common assignment checks.
+    # The browser performs all calculations on the provided OSU data.
+    normalized = re.sub(r"\s+", " ", question.lower()).strip()
+    year_match = re.search(r"\b201[0-4]\b", normalized)
+    year = int(year_match.group()) if year_match else 2014
+
+    def base_plan(intent):
+        return {
+            'intent': intent, 'year': year, 'field': 'none', 'keyword': '',
+            'group_by': 'none', 'min_amount': None, 'max_amount': None,
+            'min_exclusive': False, 'sort': 'amount_desc', 'limit': 50,
+        }
+
+    # Part III Q5: >= $4,900 and < $5,000. The browser's upper bound
+    # is inclusive, so using 4999.999 is equivalent for cent-valued data.
+    near_limit = (re.search(r'4,?900', normalized) and re.search(r'5,?000', normalized)
+                  and re.search(r'between|just below|near|under|less than', normalized))
+    if near_limit and re.search(r'\b(?:transactions?|p[ -]?card purchases|charges)\b', normalized):
+        plan = base_plan('count' if re.search(r'how many|number of|count', normalized) else 'list')
+        plan.update(min_amount=4900.0, max_amount=4999.999)
+        return jsonify(plan)
+
+    # Remove references to the agency so 'at Oklahoma State University' is
+    # not misinterpreted as a vendor filter or a condition on a transaction.
+    stripped = re.sub(r'\b(?:at |for |from )?(?:oklahoma state university|osu)\b', '', normalized)
+    asks_transaction_count = bool(re.search(r'\b(?:how many|number of|count|total number of)\b', stripped)) and bool(re.search(r'\b(?:transactions?|p[ -]?card (?:purchases|charges))\b', stripped))
     asks_total_spend = bool(re.search(
-        r'\b(?:total|overall|aggregate)\b.{0,35}\b(?:spend(?:ing)?|amount|paid|payments|purchases)\b|'
-        r'\b(?:how much|what amount)\b.{0,35}\b(?:spent|spending|paid)\b',
-        normalized
+        r'\b(?:total|overall|aggregate)\b.{0,45}\b(?:spend(?:ing)?|amount|paid|payments|purchases)\b|'
+        r'\b(?:how much|what amount)\b.{0,45}\b(?:spent|spending|paid)\b',
+        stripped,
     ))
-    # Only use this fast path for simple, unfiltered population totals.
-    # Filtered questions must not silently return the unfiltered count.
+    # Only fast-path genuinely unfiltered population totals; never silently
+    # give a total for a question involving a merchant, cardholder, or limit.
     has_specific_filter = bool(re.search(
-        r'\$|\b(?:over|under|above|below|exceed|greater|less|between|at|from|to|by|per|'
+        r'\$|\b(?:over|under|above|below|exceed|greater|less|between|'
         r'where|whose|which|vendor|merchant|employee|cardholder|duplicate|insurance|'
         r'alcohol|gift|postage|usps|amazon|restaurant|hotel|weekend|monthly|month)\b',
-        normalized
+        stripped,
     ))
     if not has_specific_filter and (asks_transaction_count or asks_total_spend):
-        year_match = re.search(r'\b201[0-4]\b', question)
-        year = int(year_match.group()) if year_match else 2014
-        return jsonify({
-            'intent': 'count' if asks_transaction_count else 'sum',
-            'year': year, 'field': 'none', 'keyword': '', 'group_by': 'none',
-            'min_amount': None, 'max_amount': None, 'min_exclusive': False,
-            'sort': 'amount_desc', 'limit': 50,
-        })
+        return jsonify(base_plan('count' if asks_transaction_count else 'sum'))
     # Deterministic handling of Part II Control 1: this must not depend on
     # Gemini availability or interpretation. The browser calculates from data.
     annual_employee_query = (re.search(r'\b(?:employees?|cardholders?|people|staff)\b', question, re.I)
