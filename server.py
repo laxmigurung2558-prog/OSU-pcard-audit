@@ -44,6 +44,34 @@ def interpret():
     question = str(payload.get('question', '')).strip()
     if not question or len(question) > 1000:
         return jsonify(error='Enter a question of at most 1,000 characters.'), 400
+    # Deterministic handling for uncomplicated population-wide audit totals.
+    # This works even when Gemini is unavailable, with no model-generated SQL.
+    normalized = question.lower()
+    asks_transaction_count = bool(re.search(
+        r'\b(?:how many|number of|count|total number of)\b', normalized
+    )) and bool(re.search(r'\b(?:transactions?|p[ -]?card (?:purchases|charges))\b', normalized))
+    asks_total_spend = bool(re.search(
+        r'\b(?:total|overall|aggregate)\b.{0,35}\b(?:spend(?:ing)?|amount|paid|payments|purchases)\b|'
+        r'\b(?:how much|what amount)\b.{0,35}\b(?:spent|spending|paid)\b',
+        normalized
+    ))
+    # Only use this fast path for simple, unfiltered population totals.
+    # Filtered questions must not silently return the unfiltered count.
+    has_specific_filter = bool(re.search(
+        r'\$|\b(?:over|under|above|below|exceed|greater|less|between|at|from|to|by|per|'
+        r'where|whose|which|vendor|merchant|employee|cardholder|duplicate|insurance|'
+        r'alcohol|gift|postage|usps|amazon|restaurant|hotel|weekend|monthly|month)\b',
+        normalized
+    ))
+    if not has_specific_filter and (asks_transaction_count or asks_total_spend):
+        year_match = re.search(r'\b201[0-4]\b', question)
+        year = int(year_match.group()) if year_match else 2014
+        return jsonify({
+            'intent': 'count' if asks_transaction_count else 'sum',
+            'year': year, 'field': 'none', 'keyword': '', 'group_by': 'none',
+            'min_amount': None, 'max_amount': None, 'min_exclusive': False,
+            'sort': 'amount_desc', 'limit': 50,
+        })
     # Deterministic handling of Part II Control 1: this must not depend on
     # Gemini availability or interpretation. The browser calculates from data.
     annual_employee_query = (re.search(r'\b(?:employees?|cardholders?|people|staff)\b', question, re.I)
