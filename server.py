@@ -6,6 +6,8 @@ model-generated SQL and never sends transaction records to Gemini.
 import json
 import os
 import re
+import time
+from threading import Lock
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -16,6 +18,12 @@ from google.genai import types
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / '.env')
 app = Flask(__name__, static_folder=None)
+# Cache only successful interpretations, not transaction data or API credentials.
+_plan_cache = {}
+_cache_lock = Lock()
+_quota_until = 0.0
+_CACHE_TTL_SECONDS = 24 * 60 * 60
+_QUOTA_COOLDOWN_SECONDS = 60 * 60
 
 SYSTEM_INSTRUCTIONS = """You are a question interpreter for an internal audit of purchasing-card transactions.
 Convert the user's question to a single JSON object containing ONLY these keys:
@@ -40,6 +48,7 @@ Return JSON only.
 
 @app.post('/api/interpret')
 def interpret():
+    global _quota_until
     payload = request.get_json(silent=True) or {}
     question = str(payload.get('question', '')).strip()
     if not question or len(question) > 1000:
@@ -102,6 +111,45 @@ def interpret():
                 question, re.I)),
             'sort': 'total_desc', 'limit': 100,
         })
+    # Audit-safe, quota-free plans for familiar questions. More complex or
+    # genuinely unfamiliar wording still goes to Gemini.
+    count_words = bool(re.search(r'how many|number of|count', stripped))
+    refers_to_transactions = bool(re.search(r'\b(?:transactions?|p[ -]?card (?:purchases|charges))\b', stripped))
+    threshold_5000 = bool(re.search(r'\b(?:over|above|exceed(?:ed|s|ing)?|more than|greater than)\s*\$?5,?000\b', stripped))
+    if refers_to_transactions and threshold_5000 and not re.search(r'\b(?:employee|cardholder|vendor|merchant|per month)\b', stripped):
+        plan = base_plan('count' if count_words else 'list')
+        plan.update(min_amount=5000.0, min_exclusive=True, limit=100)
+        return jsonify(plan)
+    if refers_to_transactions and count_words and re.search(r'\bduplicat(?:es?|ed|ion)?\b', stripped):
+        return jsonify({'intent': 'duplicates', 'year': year})
+    if re.search(r'\bduplicat(?:es?|ed|ion)?\b', stripped) and re.search(r'\b(?:transactions?|payments?|charges?)\b', stripped):
+        return jsonify({'intent': 'duplicates', 'year': year})
+    if re.search(r'\b(?:insurance|insurers?)\b', stripped) and re.search(r'\b(?:mcc|merchant|category|transactions?|purchases?)\b', stripped):
+        plan = base_plan('count' if count_words else 'list')
+        plan.update(field='MCC', keyword='INSURANCE', limit=100)
+        return jsonify(plan)
+    if re.search(r'\b(?:vendors?|merchants?)\b', stripped) and re.search(r'\b(?:highest|most|top|largest|total payments|total spend|total spending)\b', stripped):
+        plan = base_plan('group')
+        plan.update(group_by='Vendor', sort='total_desc', limit=50)
+        return jsonify(plan)
+    if re.search(r'\b(?:employees?|cardholders?)\b', stripped) and re.search(r'\b(?:highest|most|top|largest)\b', stripped) and re.search(r'\b(?:spend|spent|payments?)\b', stripped):
+        plan = base_plan('group')
+        plan.update(group_by='FullName', sort='total_desc', limit=50)
+        return jsonify(plan)
+    if refers_to_transactions and re.search(r'\b(?:largest|biggest|highest|top)\b', stripped):
+        plan = base_plan('list')
+        n = re.search(r'\b(?:top|show(?: me)?(?: the)?)\s*(\d{1,3})\b', stripped)
+        plan.update(sort='amount_desc', limit=min(100, int(n.group(1))) if n else 50)
+        return jsonify(plan)
+    # Avoid consuming repeated daily quota on identical Gemini prompts.
+    cache_key = (normalized, year)
+    with _cache_lock:
+        cached = _plan_cache.get(cache_key)
+        if cached and cached[0] > time.monotonic():
+            return jsonify(cached[1])
+        quota_blocked = time.monotonic() < _quota_until
+    if quota_blocked:
+        return jsonify(error='Gemini daily request quota was exceeded. Standard audit searches remain available; try this advanced question after quota reset.', code='QUOTA_EXCEEDED'), 429
     key = os.getenv('GEMINI_API_KEY')
     if not key:
         return jsonify(error='Gemini API key is not configured on the server.'), 503
@@ -162,14 +210,20 @@ def interpret():
         else:
             obj['group_min_total'] = None
             obj['group_min_exclusive'] = False
+        with _cache_lock:
+            _plan_cache[cache_key] = (time.monotonic() + _CACHE_TTL_SECONDS, dict(obj))
+            if len(_plan_cache) > 500:
+                for key_to_drop in list(_plan_cache)[:100]:
+                    _plan_cache.pop(key_to_drop, None)
         return jsonify(obj)
     except Exception as exc:
-        app.logger.warning(
-    'Gemini request failed: type=%s status=%s',
-    type(exc).__name__,
-    getattr(exc, 'status_code', getattr(exc, 'code', 'unknown'))
-)
-        return jsonify(error='Gemini could not interpret this question. Check your API key, quota, and internet connection.'), 502
+        status = getattr(exc, 'status_code', getattr(exc, 'code', None))
+        app.logger.warning('Gemini request failed: type=%s status=%s', type(exc).__name__, status)
+        if str(status) == '429':
+            with _cache_lock:
+                _quota_until = time.monotonic() + _QUOTA_COOLDOWN_SECONDS
+            return jsonify(error='Gemini request quota exceeded. Standard audit questions still work. Try advanced questions after the daily quota resets.', code='QUOTA_EXCEEDED'), 429
+        return jsonify(error='Gemini could not process this question right now. Standard audit questions remain available.'), 502
 
 @app.get('/')
 def homepage():

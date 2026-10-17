@@ -65,6 +65,18 @@ async function askGemini(raw){
   });
   const plan=await response.json();
   if(!response.ok)throw new Error(plan.error||'Gemini service unavailable');
+  if(plan.intent==='duplicates'){
+    const year=/\b201[0-4]\b/.test(q)?plan.year:Number($('askYear').value);
+    $('askYear').value=String(year);
+    const duplicate=duplicateRows(await getYear(year));
+    const total=duplicate.reduce((s,r)=>s+r.amount,0);
+    if(/\b(?:how many|number of|count)\b/i.test(q)){
+      $(target).innerHTML=`<h3>Possible duplicate transaction rows · ${year}</h3><div class="metrics"><div class="metric"><strong>${number(duplicate.length)}</strong>Matching transactions</div></div><p class="explain">Matching positive charges by date, vendor, first initial, last name, and amount. Not proof of duplicate payment.</p>`;
+    }else{
+      display(target,`Possible duplicate transactions · ${year}`,duplicate,cols,'Matching positive charges; investigate before treating as a duplicate.',total);
+    }
+    return;
+  }
   if(plan.intent==='unknown'){
     $(target).innerHTML='<strong>That question needs a different analysis.</strong><p>Try asking for a count, total spending, a transaction list, or spending grouped by cardholder or vendor.</p>';
     return;
@@ -113,7 +125,7 @@ async function askGemini(raw){
 }
 async function askWithGemini(question){
   try{await askGemini(question);}catch(error){
-    $('askResult').innerHTML=`<strong>Gemini is unavailable:</strong> ${html(error.message)}<p>You can still use the original question patterns and dashboard.</p><button id="fallbackAsk">Use basic search instead</button>`;
+    $('askResult').innerHTML=`<strong>${/quota|429/i.test(error.message)?'Gemini daily quota reached':'Gemini is unavailable'}:</strong> ${html(error.message)}<p>Built-in audit searches and the prohibited-purchase dashboard remain available.</p><button id="fallbackAsk">Try basic search instead</button>`;
     $('fallbackAsk').onclick=()=>askQuestion(question);
   }
 }
