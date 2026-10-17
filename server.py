@@ -164,7 +164,11 @@ def interpret():
             obj['group_min_exclusive'] = False
         return jsonify(obj)
     except Exception as exc:
-        app.logger.warning('Gemini request failed: %s', type(exc).__name__)
+        app.logger.warning(
+    'Gemini request failed: type=%s status=%s',
+    type(exc).__name__,
+    getattr(exc, 'status_code', getattr(exc, 'code', 'unknown'))
+)
         return jsonify(error='Gemini could not interpret this question. Check your API key, quota, and internet connection.'), 502
 
 @app.get('/')
