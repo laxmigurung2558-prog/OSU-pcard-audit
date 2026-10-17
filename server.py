@@ -90,6 +90,20 @@ def interpret():
             obj['min_exclusive'] = False
         for k in ('min_amount', 'max_amount'):
             obj[k] = None if obj.get(k) is None else float(obj[k])
+        # Annual per-cardholder spending controls: aggregate FIRST, filter totals SECOND.
+        # This deterministic rule prevents Gemini from interpreting $50,000 as
+        # a per-transaction threshold or an employee-name search.
+        annual_employee_query = (re.search(r'\b(?:employees?|cardholders?|people|staff)\b', question, re.I)
+                                 and re.search(r'\b(?:total|annual|during|spent|spending)\b', question, re.I)
+                                 and re.search(r'\$?50,?000\b', question))
+        if annual_employee_query:
+            obj.update(intent='group', field='none', keyword='', group_by='FullName',
+                       min_amount=None, max_amount=None, group_min_total=50000.0,
+                       group_min_exclusive=bool(re.search(r'\b(?:more than|over|exceed(?:ed|s|ing)?|above|greater than)\b', question, re.I)),
+                       sort='total_desc', limit=100)
+        else:
+            obj['group_min_total'] = None
+            obj['group_min_exclusive'] = False
         return jsonify(obj)
     except Exception as exc:
         app.logger.warning('Gemini request failed: %s', type(exc).__name__)

@@ -79,7 +79,10 @@ async function askGemini(raw){
     if(!field){$(target).textContent='Gemini returned a search without a valid field.';return;}
     rows=rows.filter(r=>String(r[field]??'').toLowerCase().includes(keyword));
   }
-  if(plan.min_amount!==null)rows=rows.filter(r=>plan.min_exclusive ? r.amount>Number(plan.min_amount) : r.amount>=Number(plan.min_amount));
+  // Group-total thresholds apply AFTER aggregation, not to individual purchases.
+  const isAnnualCardholderThreshold = plan.intent==='group' && plan.group_by==='FullName' &&
+    Number(plan.group_min_total)>0;
+  if(!isAnnualCardholderThreshold && plan.min_amount!==null)rows=rows.filter(r=>plan.min_exclusive ? r.amount>Number(plan.min_amount) : r.amount>=Number(plan.min_amount));
   if(plan.max_amount!==null)rows=rows.filter(r=>r.amount<=Number(plan.max_amount));
   const sum=rows.reduce((s,r)=>s+r.amount,0);
   const limit=Math.min(100,Math.max(1,Number(plan.limit)||50));
@@ -93,8 +96,13 @@ async function askGemini(raw){
     if(!groupField){$(target).textContent='Please specify grouping by cardholder, vendor, or MCC.';return;}
     const map=new Map();
     for(const r of rows){const k=String(r[groupField]||'—');const v=map.get(k)||{group:k,total:0,quantity:0};v.total+=r.amount;v.quantity++;map.set(k,v);}
-    const groups=[...map.values()].sort((a,b)=>plan.sort==='count_desc'?b.quantity-a.quantity:b.total-a.total).slice(0,limit);
-    display(target,`Spending by ${plan.group_by} · ${year}`,groups,[['group',plan.group_by],['quantity','Transactions'],['total','Net amount']],criteria);
+    let groups=[...map.values()];
+    if(isAnnualCardholderThreshold) groups=groups.filter(g => plan.group_min_exclusive ? g.total>Number(plan.group_min_total) : g.total>=Number(plan.group_min_total));
+    groups.sort((a,b)=>plan.sort==='count_desc'?b.quantity-a.quantity:b.total-a.total);
+    const totalGroups=groups.length;
+    const shown=groups.slice(0,limit);
+    const extra=isAnnualCardholderThreshold ? ` Annual employee spending ${plan.group_min_exclusive?'>':'≥'} ${usd(plan.group_min_total)}; ${number(totalGroups)} qualifying employees. Showing ${number(shown.length)}.` : ` Showing ${number(shown.length)} of ${number(totalGroups)} groups.`;
+    display(target,`Spending by ${plan.group_by} · ${year}`,shown,[['group',plan.group_by],['quantity','Transactions'],['total','Net amount']],criteria+extra);
   }else{
     if(plan.sort==='amount_asc')rows.sort((a,b)=>a.amount-b.amount);
     else if(plan.sort==='date_asc')rows.sort((a,b)=>String(a.date).localeCompare(String(b.date)));
